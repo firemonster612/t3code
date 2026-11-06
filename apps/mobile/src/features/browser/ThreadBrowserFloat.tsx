@@ -23,6 +23,8 @@ export function ThreadBrowserFloat(props: {
   readonly tabs: ReadonlyArray<PreviewSessionSnapshot>;
   readonly loaded: boolean;
   readonly top: number;
+  /** Keeps the open tab while something covers the thread, such as a full-screen composer. */
+  readonly hidden?: boolean;
   readonly onOpen: (tabId: string) => void;
 }) {
   const [tabId, setTabId] = useState<string | null>(null);
@@ -60,7 +62,7 @@ export function ThreadBrowserFloat(props: {
     onOpen(tabId);
   };
   const close = () => setTabId(null);
-  if (!tab || !focused) return null;
+  if (!tab || !focused || props.hidden) return null;
   return (
     <FloatingBrowserPlayer
       environmentId={props.environmentId}

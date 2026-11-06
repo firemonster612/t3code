@@ -33,7 +33,7 @@ import {
 import { StackActions, useFocusEffect, useNavigation } from "@react-navigation/native";
 import type { ReactNode } from "react";
 import { useEffect, useEffectEvent, useRef, useState, type RefObject } from "react";
-import { I18nManager, Keyboard, Platform, View, type ViewStyle } from "react-native";
+import { I18nManager, Keyboard, Platform, Pressable, View, type ViewStyle } from "react-native";
 import { composerImageGallery } from "../../lib/composerImageGallery";
 import { filePreviewGallery } from "../../lib/filePreviewGallery";
 import { FilePreviewModal, type FilePreviewSource } from "../../components/FilePreviewModal";
@@ -72,6 +72,7 @@ import { useLinkedEnvironments } from "../../state/peerLinks";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 
 import { AppText as Text } from "../../components/ui/AppText";
+import { SymbolView } from "../../components/ui/AppSymbol";
 import { ComposerAttachmentButton } from "./ComposerAttachmentButton";
 import {
   ComposerAttachmentStrip,
@@ -139,7 +140,19 @@ function collapsedEditorInset(text: ScaledTextRole): number {
   return Math.max(0, Math.round(COLLAPSED_EDITOR_DEFAULT_INSET - shift));
 }
 
-function useCompactComposerEditor(text: ScaledTextRole, value: string) {
+/** Below the multi-line editor: the toolbar row and the gap above it. */
+const EXPANDED_EDITOR_BOTTOM = 52;
+
+function useCompactComposerEditor(
+  text: ScaledTextRole,
+  value: string,
+  layout: {
+    /** Set while the editor fills the card: its height and the room kept below it. */
+    readonly fill: { readonly height: number; readonly bottom: number } | null;
+    /** Right inset of the multi-line editor. */
+    readonly endInset: number;
+  },
+) {
   const [contentSize, setContentSize] = useState({ width: 0, height: 0 });
   const [compactWidth, setCompactWidth] = useState(0);
   const contentHeight = contentSize.height;
@@ -149,16 +162,18 @@ function useCompactComposerEditor(text: ScaledTextRole, value: string) {
   const inset =
     Platform.OS === "android" ? COLLAPSED_EDITOR_DEFAULT_INSET : collapsedEditorInset(text);
   const minimum = Math.max(INLINE_EDITOR_HEIGHT, Math.ceil(text.lineHeight) + 2 * inset);
-  const height = Math.max(
-    minimum,
-    Math.min(text.lineHeight * 4 + 2 * inset, contentHeight + 2 * inset),
-  );
+  const { fill, endInset } = layout;
+  const height =
+    fill?.height ??
+    Math.max(minimum, Math.min(text.lineHeight * 4 + 2 * inset, contentHeight + 2 * inset));
+  const expandedBottom = fill?.bottom ?? EXPANDED_EDITOR_BOTTOM;
   // A line that fits the expanded editor may still overflow its compact slot.
   // Compare its measured width too so widening cannot trigger a collapse loop.
   const isExpanded =
-    value.length > 0 &&
-    (contentHeight > text.lineHeight * 1.5 ||
-      (compactWidth > 0 && contentSize.width > compactWidth));
+    fill !== null ||
+    (value.length > 0 &&
+      (contentHeight > text.lineHeight * 1.5 ||
+        (compactWidth > 0 && contentSize.width > compactWidth)));
   const compactRowHeight = Math.max(44, minimum);
   const isRTL = I18nManager.isRTL;
   const editorStyle = useAnimatedStyle(() => ({
@@ -166,7 +181,7 @@ function useCompactComposerEditor(text: ScaledTextRole, value: string) {
     overflow: "hidden",
     height,
     ...(isExpanded
-      ? { left: 14, right: 14 }
+      ? { left: 14, right: endInset }
       : compactEditorInsets({
           slotX: editorX.value,
           slotWidth: editorWidth.value,
@@ -174,11 +189,11 @@ function useCompactComposerEditor(text: ScaledTextRole, value: string) {
           isRTL,
         })),
     // The full-width editor must move above the controls in the same frame it widens.
-    bottom: isExpanded ? 52 : (compactRowHeight - minimum) / 2,
+    bottom: isExpanded ? expandedBottom : (compactRowHeight - minimum) / 2,
   }));
   return {
     isExpanded,
-    containerStyle: { height: isExpanded ? height + 52 : compactRowHeight },
+    containerStyle: { height: isExpanded ? height + expandedBottom : compactRowHeight },
     editorStyle,
     onRowLayout: (event: { nativeEvent: { layout: { width: number } } }) => {
       rowWidth.set(event.nativeEvent.layout.width);
@@ -194,7 +209,8 @@ function useCompactComposerEditor(text: ScaledTextRole, value: string) {
     },
     editorProps: {
       singleLineCentered: !isExpanded,
-      scrollEnabled: Platform.OS === "android" || contentHeight >= text.lineHeight * 4,
+      scrollEnabled:
+        fill !== null || Platform.OS === "android" || contentHeight >= text.lineHeight * 4,
       contentInsetVertical: inset,
       onContentSizeChange: (size: { width: number; height: number }) => {
         setContentSize(size);
@@ -256,6 +272,13 @@ export interface ThreadComposerProps {
   readonly onUpdateInteractionMode?: (interactionMode: ProviderInteractionMode) => void;
   readonly onHeightChange?: (height: number) => void;
   readonly onEditorFocusChange?: (focused: boolean) => void;
+  /**
+   * Whether the composer fills the space its host gives it. The host owns that
+   * space; the composer offers the toggle while `onFullScreenChange` is set, and
+   * leaves full screen when it stops editing or sends.
+   */
+  readonly fullScreen?: boolean;
+  readonly onFullScreenChange?: (fullScreen: boolean) => void;
 }
 
 // Android KeyboardStickyView tracks the IME; concurrent timed layout morphs cause jitter.
@@ -353,6 +376,8 @@ function ComposerSurface(props: {
   readonly children: ReactNode;
   readonly style: ViewStyle;
   readonly animateLayout?: boolean;
+  /** Stretches the card to its parent's height, for the full-screen composer. */
+  readonly fill?: boolean;
 }) {
   const colors = useUniwindTheme();
   const targetBorderRadius =
@@ -384,6 +409,7 @@ function ComposerSurface(props: {
         animatedShapeStyle,
         {
           overflow: "hidden",
+          flex: props.fill ? 1 : undefined,
         },
       ]}
     >
@@ -402,7 +428,7 @@ function ComposerSurface(props: {
       <Animated.View
         collapsable={false}
         layout={layoutTransition}
-        style={[props.style, animatedShapeStyle]}
+        style={[props.style, animatedShapeStyle, props.fill ? { flex: 1 } : null]}
       >
         {props.children}
       </Animated.View>
@@ -593,7 +619,34 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
   const surfacePaddingVertical = usesLargeControls ? 9 : floatingSidebarComposer ? 6 : 2;
   const [compactRowWidth, setCompactRowWidth] = useState(0);
   const compactAttachmentLimit = compactRowWidth >= 500 ? 3 : 1;
-  const compactEditor = useCompactComposerEditor(bodyText, draftMessage);
+  const { onFullScreenChange } = props;
+  const isFullScreen = isExpanded && props.fullScreen === true;
+  const [editorAreaHeight, setEditorAreaHeight] = useState(0);
+  const [inlinePopoverHeight, setInlinePopoverHeight] = useState(0);
+  const commandPopover =
+    !isSubmissionLocked &&
+    composerMenu.trigger &&
+    (composerMenu.items.length > 0 || composerMenu.trigger.kind === "pull-request") ? (
+      <ComposerCommandPopover
+        items={composerMenu.items}
+        triggerKind={composerMenu.trigger.kind}
+        isLoading={composerMenu.isLoading}
+        error={composerMenu.error}
+        onSelect={composerMenu.onSelect}
+      />
+    ) : null;
+  // Nothing sits above a full-screen composer, so suggestions take room from the editor.
+  const fillBottom =
+    EXPANDED_EDITOR_BOTTOM + (commandPopover !== null ? inlinePopoverHeight + 8 : 0);
+  const compactEditor = useCompactComposerEditor(bodyText, draftMessage, {
+    fill:
+      isFullScreen && editorAreaHeight > 0
+        ? { height: Math.max(0, editorAreaHeight - fillBottom - 4), bottom: fillBottom }
+        : null,
+    endInset: isExpanded && onFullScreenChange ? 44 : 14,
+  });
+  const showsFullScreenToggle =
+    isExpanded && onFullScreenChange !== undefined && compactEditor.isExpanded;
   const showsCompactDictation = isVoiceInputPresented;
   const isToolbarVisible = isVoiceInputPresented;
   const hasEditingAttachments =
@@ -664,6 +717,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
 
   const handleBlur = () => {
     setIsFocused(false);
+    onFullScreenChange?.(false);
     settingsSheetPresentation.onEditorFocusChange(false);
     onEditorFocusChange?.(false);
     setComposerEditing(false);
@@ -704,6 +758,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
       return;
     }
     if (sent.value === null) return;
+    onFullScreenChange?.(false);
     // Arm after send so preference reads and native Activity startup do not delay tap-frame feedback.
     armAgentAwarenessLiveActivityForLocalWork({
       environmentId: props.environmentId,
@@ -818,6 +873,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
       onLayout={(event) => props.onHeightChange?.(event.nativeEvent.layout.height)}
       className="px-[12px]"
       style={{
+        flex: isFullScreen ? 1 : undefined,
         paddingTop: 6,
         paddingBottom: (props.bottomInset ?? 0) + THREAD_COMPOSER_BOTTOM_GUTTER,
         backgroundColor:
@@ -835,21 +891,11 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
       />
       <Animated.View
         className="relative w-full self-center"
-        style={{ maxWidth: props.contentMaxWidth }}
+        style={{ maxWidth: props.contentMaxWidth, flex: isFullScreen ? 1 : undefined }}
       >
         {props.draftControls}
-        {!isSubmissionLocked &&
-        composerMenu.trigger &&
-        (composerMenu.items.length > 0 || composerMenu.trigger.kind === "pull-request") ? (
-          <ComposerPopoverAnchor>
-            <ComposerCommandPopover
-              items={composerMenu.items}
-              triggerKind={composerMenu.trigger.kind}
-              isLoading={composerMenu.isLoading}
-              error={composerMenu.error}
-              onSelect={composerMenu.onSelect}
-            />
-          </ComposerPopoverAnchor>
+        {commandPopover !== null && !isFullScreen ? (
+          <ComposerPopoverAnchor>{commandPopover}</ComposerPopoverAnchor>
         ) : null}
 
         {selectedProviderStatus?.compatibilityAdvisory?.message &&
@@ -883,6 +929,7 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
 
         <ComposerSurface
           animateLayout={false}
+          fill={isFullScreen}
           style={{
             borderRadius: usesLargeControls ? 31 : 27,
             borderCurve: "circular",
@@ -896,9 +943,11 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
           />
           {isExpanded ? editingAttachments : null}
           <View
+            className={isFullScreen ? "flex-1 justify-end" : undefined}
             onLayout={(event) => {
               compactEditor.onRowLayout(event);
               setCompactRowWidth(event.nativeEvent.layout.width);
+              setEditorAreaHeight(event.nativeEvent.layout.height);
             }}
           >
             <ComposerDictationDraftContent
@@ -1130,6 +1179,34 @@ export const ThreadComposer = function ThreadComposer(props: ThreadComposerProps
                 )}
               </View>
             </ComposerDictationDraftContent>
+            {isFullScreen && commandPopover !== null ? (
+              <View
+                className="absolute inset-x-2"
+                style={{ bottom: EXPANDED_EDITOR_BOTTOM }}
+                onLayout={(event) => setInlinePopoverHeight(event.nativeEvent.layout.height)}
+              >
+                {commandPopover}
+              </View>
+            ) : null}
+            {showsFullScreenToggle ? (
+              <Pressable
+                accessibilityLabel={isFullScreen ? "Collapse composer" : "Expand composer"}
+                accessibilityRole="button"
+                className="absolute right-[2px] top-0 size-[40px] items-center justify-center active:opacity-70"
+                onPress={() => onFullScreenChange?.(!isFullScreen)}
+              >
+                <SymbolView
+                  name={
+                    isFullScreen
+                      ? "arrow.down.right.and.arrow.up.left"
+                      : "arrow.up.left.and.arrow.down.right"
+                  }
+                  size={15}
+                  tintColorClassName="accent-icon-muted"
+                  type="monochrome"
+                />
+              </Pressable>
+            ) : null}
           </View>
           <Animated.View
             accessibilityElementsHidden={!isToolbarVisible}

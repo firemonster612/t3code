@@ -82,6 +82,7 @@ import {
   useCallback,
   useEffect,
   useEffectEvent,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
@@ -142,6 +143,7 @@ import { deviceEnvironment } from "../../state/device";
 import { useEnvironmentQuery } from "../../state/query";
 import { threadDevicePreviews } from "../devices/threadDevicePreviews";
 import { ThreadBrowserFloat } from "../browser/ThreadBrowserFloat";
+import { useComposerFullScreen } from "./ThreadScreenHost";
 import { useThreadServerBrowserTabs } from "../../state/preview";
 import type { QueuedThreadMessage } from "../../state/thread-outbox-model";
 import { scopedThreadKey } from "../../lib/scopedEntities";
@@ -1010,6 +1012,27 @@ function ThreadDetailBody(
   }
   const reservedKeyboardHeight =
     lastKnownKeyboardHeight > 0 ? lastKnownKeyboardHeight : ESTIMATED_KEYBOARD_HEIGHT;
+  // Cards that share the column with the composer take precedence over full screen.
+  const composerFullScreen = useComposerFullScreen();
+  const composerCanFillScreen =
+    !composerSlotHidden &&
+    !isProviderSubagent &&
+    props.activePendingApproval === null &&
+    usageLimitsReport === null;
+  const composerFillsScreen =
+    composerCanFillScreen && composerFullScreen?.threadKey === selectedThreadKey;
+  const setFullScreenThreadKey = composerFullScreen?.setThreadKey;
+  const handleComposerFullScreenChange = useCallback(
+    (on: boolean) => setFullScreenThreadKey?.(on ? selectedThreadKey : null),
+    [setFullScreenThreadKey, selectedThreadKey],
+  );
+  const fullScreenStale = composerFullScreen?.threadKey != null && !composerFillsScreen;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- returns the host's header when a thread switch, approval, or unmount ends full screen
+  useLayoutEffect(() => {
+    if (fullScreenStale) setFullScreenThreadKey?.(null);
+  }, [fullScreenStale, setFullScreenThreadKey]);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- returns the host's header when this screen unmounts in full screen
+  useLayoutEffect(() => () => setFullScreenThreadKey?.(null), [setFullScreenThreadKey]);
   // Waiting for a visibility render misses the first keyboard frames.
   const keyboardStickyEnabled =
     Platform.OS === "ios"
@@ -1553,8 +1576,19 @@ function ThreadDetailBody(
           threadId={props.selectedThread.id}
           tabs={browserTabs.tabs}
           loaded={browserTabs.loaded}
+          hidden={composerFillsScreen}
           top={navigationHeaderHeight + 8}
           onOpen={openBrowserPreview}
+        />
+      ) : null}
+
+      {composerFillsScreen ? (
+        <View
+          className={
+            Platform.OS === "android"
+              ? "absolute inset-0 bg-thread-canvas"
+              : "absolute inset-0 bg-screen"
+          }
         />
       ) : null}
 
@@ -1598,6 +1632,19 @@ function ThreadDetailBody(
                         left: controlInsets.left,
                         right: controlInsets.right,
                       },
+                      // Like the question card, the full-screen composer reserves the keyboard
+                      // instead of following it, so keyboard motion only translates it. The
+                      // header is hidden, so it reaches up to the status bar.
+                      composerFillsScreen
+                        ? {
+                            top:
+                              insets.top +
+                              8 +
+                              (keyboardStickyEnabled && isKeyboardVisible
+                                ? lastKnownKeyboardHeight - composerKeyboardOffset
+                                : 0),
+                          }
+                        : null,
                       composerWidthStyle,
                     ]
               }
@@ -1605,55 +1652,58 @@ function ThreadDetailBody(
               {/* No paddingTop here: the overlay's measured height becomes the
                 list's bottom inset, so any padding above the pill/composer
                 pushes the resting content floor up by the same amount. */}
+              {/* A full-screen composer leaves the feed's inset at its docked height. */}
               <View
                 ref={composerOverlayRef}
-                onLayout={handleComposerOverlayLayout}
-                className="w-full"
+                onLayout={composerFillsScreen ? undefined : handleComposerOverlayLayout}
+                className={composerFillsScreen ? "w-full flex-1" : "w-full"}
               >
                 <View className="w-full self-center" style={{ maxWidth: contentMaxWidth }}>
-                  <FloatingWorkingControl
-                    colorScheme={isDarkMode ? "dark" : "light"}
-                    status={floatingStatus}
-                    extensionStatus={
-                      floatingStatus !== null &&
-                      (floatingStatus.kind === "working" ||
-                        floatingStatus.kind === "compacting" ||
-                        floatingStatus.kind === "background" ||
-                        floatingStatus.kind === "goal" ||
-                        floatingStatus.kind === "lifecycle")
-                        ? extensionStatus
-                        : null
-                    }
-                    lift={floatingControlLift}
-                    devicePreview={
-                      devicePreviews.length > 0
-                        ? { count: devicePreviews.length, onPress: openDevicePreview }
-                        : null
-                    }
-                    browserPreview={
-                      browserTabs.tabs.length > 0
-                        ? { count: browserTabs.tabs.length, onPress: () => openBrowserPreview() }
-                        : null
-                    }
-                    showScrollToEnd={showScrollToEndButton}
-                    onScrollToEnd={handleScrollToEnd}
-                    agents={agentsSegment}
-                    onOpenAgents={() => {
-                      Keyboard.dismiss();
-                      navigation.navigate("ThreadAgents", {
-                        environmentId: props.environmentId,
-                        threadId: props.selectedThread.id,
-                      });
-                    }}
-                    queuedCount={queuedCount}
-                    onOpenQueue={() => {
-                      Keyboard.dismiss();
-                      navigation.navigate("ThreadQueue", {
-                        environmentId: props.environmentId,
-                        threadId: props.selectedThread.id,
-                      });
-                    }}
-                  />
+                  {composerFillsScreen ? null : (
+                    <FloatingWorkingControl
+                      colorScheme={isDarkMode ? "dark" : "light"}
+                      status={floatingStatus}
+                      extensionStatus={
+                        floatingStatus !== null &&
+                        (floatingStatus.kind === "working" ||
+                          floatingStatus.kind === "compacting" ||
+                          floatingStatus.kind === "background" ||
+                          floatingStatus.kind === "goal" ||
+                          floatingStatus.kind === "lifecycle")
+                          ? extensionStatus
+                          : null
+                      }
+                      lift={floatingControlLift}
+                      devicePreview={
+                        devicePreviews.length > 0
+                          ? { count: devicePreviews.length, onPress: openDevicePreview }
+                          : null
+                      }
+                      browserPreview={
+                        browserTabs.tabs.length > 0
+                          ? { count: browserTabs.tabs.length, onPress: () => openBrowserPreview() }
+                          : null
+                      }
+                      showScrollToEnd={showScrollToEndButton}
+                      onScrollToEnd={handleScrollToEnd}
+                      agents={agentsSegment}
+                      onOpenAgents={() => {
+                        Keyboard.dismiss();
+                        navigation.navigate("ThreadAgents", {
+                          environmentId: props.environmentId,
+                          threadId: props.selectedThread.id,
+                        });
+                      }}
+                      queuedCount={queuedCount}
+                      onOpenQueue={() => {
+                        Keyboard.dismiss();
+                        navigation.navigate("ThreadQueue", {
+                          environmentId: props.environmentId,
+                          threadId: props.selectedThread.id,
+                        });
+                      }}
+                    />
+                  )}
                   <ComposerPanels
                     className="w-full"
                     style={Platform.OS === "android" ? composerPanelsHeightStyle : undefined}
@@ -1811,7 +1861,15 @@ function ThreadDetailBody(
                   </ComposerPanels>
                 </View>
 
-                <View style={composerSlotHidden ? { display: "none" } : undefined}>
+                <View
+                  style={
+                    composerSlotHidden
+                      ? { display: "none" }
+                      : composerFillsScreen
+                        ? { flex: 1 }
+                        : undefined
+                  }
+                >
                   {isProviderSubagent ? (
                     <View
                       className="self-center px-3 pt-1.5"
@@ -1934,8 +1992,14 @@ function ThreadDetailBody(
                         onShowUsageLimits={showUsageLimits}
                         canSwitchProvider={props.canSwitchThreadProvider}
                         onUpdateInteractionMode={props.onUpdateThreadInteractionMode}
-                        onHeightChange={handleComposerHeightChange}
+                        onHeightChange={
+                          composerFillsScreen ? undefined : handleComposerHeightChange
+                        }
                         onEditorFocusChange={handleOwnedInputFocusChange}
+                        fullScreen={composerFillsScreen}
+                        onFullScreenChange={
+                          composerCanFillScreen ? handleComposerFullScreenChange : undefined
+                        }
                       />
                     </>
                   )}

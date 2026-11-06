@@ -6,9 +6,10 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { View } from "react-native";
+import { Platform, View } from "react-native";
 
 import { ScreenContent } from "../../components/ui/ScreenContent";
+import { NativeStackScreenOptions } from "../../native/StackHeader";
 import { ThreadDetailScreen, type ThreadDetailScreenProps } from "./ThreadDetailScreen";
 
 type ThreadScreenContent =
@@ -33,17 +34,43 @@ function createThreadScreenStore() {
   };
 }
 const ThreadScreenContext = createContext<ReturnType<typeof createThreadScreenStore> | null>(null);
+type ComposerFullScreen = {
+  /** The thread whose composer fills the screen, with the header hidden. */
+  readonly threadKey: string | null;
+  readonly setThreadKey: (threadKey: string | null) => void;
+};
+const ComposerFullScreenContext = createContext<ComposerFullScreen | null>(null);
+
+// Owned here so the header and the composer change in the same render.
+export function useComposerFullScreen() {
+  return useContext(ComposerFullScreenContext);
+}
 
 function ThreadScreenOutlet() {
   const store = useContext(ThreadScreenContext)!;
   const content = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  const [fullScreenThreadKey, setFullScreenThreadKey] = useState<string | null>(null);
   if (content === null) return null;
+  const headerHidden = fullScreenThreadKey !== null;
   const body = "props" in content ? <ThreadDetailScreen {...content.props} /> : content.fallback;
+  // Android draws the header in React, so it stays mounted and returns in the same
+  // frame. iOS remounts it to reapply the native options that show it again.
+  const header = !("props" in content) ? (
+    content.header
+  ) : Platform.OS === "android" ? (
+    <View style={headerHidden ? { display: "none" } : undefined}>{content.props.header}</View>
+  ) : headerHidden ? (
+    <NativeStackScreenOptions options={{ headerShown: false }} />
+  ) : (
+    content.props.header
+  );
   return (
-    <>
-      {"props" in content ? content.props.header : content.header}
+    <ComposerFullScreenContext.Provider
+      value={{ threadKey: fullScreenThreadKey, setThreadKey: setFullScreenThreadKey }}
+    >
+      {header}
       <ScreenContent surface="canvas">{body}</ScreenContent>
-    </>
+    </ComposerFullScreenContext.Provider>
   );
 }
 
